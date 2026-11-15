@@ -1,0 +1,41 @@
+name: Vigia do revezamento
+
+# Reabre o ciclo se nao houver nenhuma sessao ativa (ver README, "Vigia").
+# Ligue em UM dos dois repositorios com a variavel WATCHDOG_ENABLED=true.
+# Sem ela (ou sem PEER_REPO) o job e ignorado e nao consome minutos.
+on:
+  schedule:
+    # Minutos fora de :00/:30, que sao os mais disputados pelo agendador do GitHub.
+    - cron: '7,37 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vigia
+  cancel-in-progress: false
+
+jobs:
+  vigia:
+    if: ${{ vars.WATCHDOG_ENABLED == 'true' && vars.PEER_REPO != '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts
+
+      - name: Conferir sessoes e reabrir o ciclo se preciso
+        env:
+          PEER_REPO: ${{ vars.PEER_REPO }}
+          PEER_WORKFLOW: ${{ vars.PEER_WORKFLOW }}
+          PEER_REPO_TOKEN: ${{ secrets.PEER_REPO_TOKEN }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: python3 scripts/vigia.py

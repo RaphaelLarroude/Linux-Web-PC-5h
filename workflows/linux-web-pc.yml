@@ -1,0 +1,318 @@
+name: Linux Web PC
+
+on:
+  workflow_dispatch:
+    inputs:
+      startup_instruction:
+        description: 'Tarefas para Qwen + Needle (vazio usa INICIALIZACAO.txt; sem credenciais)'
+        required: false
+        type: string
+        default: ''
+      needle_preview_only:
+        description: 'Somente planejar as automacoes, sem aplicar as rotinas'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# A proxima execucao aguarda a anterior terminar de salvar.
+concurrency:
+  group: linux-web-pc
+  cancel-in-progress: false
+
+jobs:
+  linux-web-pc:
+    outputs:
+      tools_ready: ${{ steps.export_tools.outcome }}
+    # Uso para desenvolvimento e testes do projeto do repositorio.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Marcar inicio
+        run: echo "SESSION_STARTED=$(date +%s)" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Instalar ferramentas
+        id: dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            xfce4 xfce4-terminal xvfb x11vnc novnc websockify dbus-x11 curl
+          if ! command -v google-chrome >/dev/null; then
+            curl -fsSL --retry 3 -o "$RUNNER_TEMP/chrome.deb" \
+              https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "$RUNNER_TEMP/chrome.deb"
+          fi
+          python3 -m venv "$RUNNER_TEMP/backup-venv"
+          "$RUNNER_TEMP/backup-venv/bin/pip" install -r requirements.txt
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/cloudflared" \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod 700 "$RUNNER_TEMP/cloudflared"
+
+      - name: Instalar TeleDrive
+        # Versao e checksum fixados em automacoes/teledrive.json. Uma falha aqui nao impede o desktop.
+        # Desligue com a variavel TELEDRIVE_AUTO=false.
+        if: ${{ vars.TELEDRIVE_AUTO != 'false' }}
+        continue-on-error: true
+        timeout-minutes: 10
+        run: bash scripts/teledrive_instalar.sh
+
+      - name: Verificar destino do backup antes de abrir desktop
+        env:
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          TG_SESSION: ${{ secrets.TG_SESSION }}
+          TG_CHANNEL_ID: ${{ secrets.TG_CHANNEL_ID }}
+          TELEDRIVE_PASSPHRASE: ${{ secrets.TELEDRIVE_PASSPHRASE }}
+          BACKUP_PASSWORD: ${{ secrets.BACKUP_PASSWORD }}
+          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
+        run: |
+          test "${#VNC_PASSWORD}" -eq 8 || { echo 'Configure VNC_PASSWORD com exatamente 8 caracteres ASCII.'; exit 1; }
+          "$RUNNER_TEMP/backup-venv/bin/python" scripts/teledrive_backup.py check
+
+      - name: Verificar repositorio par do revezamento
+        # Sem PEER_REPO o passo apenas informa que o revezamento esta desligado.
+        env:
+          PEER_REPO: ${{ vars.PEER_REPO }}
+          PEER_WORKFLOW: ${{ vars.PEER_WORKFLOW }}
+          PEER_REPO_TOKEN: ${{ secrets.PEER_REPO_TOKEN }}
+        run: python3 scripts/handoff.py check
+
+      - name: Carregar ferramentas aprendidas de sessoes anteriores
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/sync_learned_tools.py pull
+
+      - name: Preparar ambiente com Qwen e Needle
+        id: hybrid_start
+        timeout-minutes: 30
+        env:
+          STARTUP_INSTRUCTION: ${{ inputs.startup_instruction || vars.INSTRUCAO_IA }}
+          NEEDLE_PREVIEW_ONLY: ${{ inputs.needle_preview_only && '1' || '0' }}
+          STARTUP_SECRETS_JSON: ${{ secrets.STARTUP_SECRETS_JSON }}
+          NEEDLE_TELEMETRY: '0'
+          DO_NOT_TRACK: '1'
+        run: |
+          "$RUNNER_TEMP/backup-venv/bin/python" scripts/hybrid_startup.py --phase before_desktop
+
+      - name: Abrir desktop
+        id: desktop
+        env:
+          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
+          DISTRO: ${{ vars.DISTRO || 'ubuntu' }}
+          DESKTOP_ENV: ${{ vars.DESKTOP_ENV || 'xfce' }}
+          DOTFILES_URLS: ${{ vars.DOTFILES_URLS }}
+          PUBLIC_REPO: ${{ vars.PUBLIC_REPO }}
+        run: bash scripts/iniciar-desktop.sh
+
+      - name: Guardar link da sessao para a GUI
+        # A GUI baixa este artifact (com token) para embutir o noVNC; em
+        # repositorio publico o link nao aparece em lugar nenhum visivel.
+        if: ${{ always() && steps.desktop.outcome == 'success' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: link-sessao-${{ github.run_id }}
+          path: ${{ runner.temp }}/linux-web-pc/access-url.txt
+          retention-days: 1
+          if-no-files-found: ignore
+
+      - name: Abrir GUI da sessao
+        # Mesma Central de Controle, modo sessao: sincronizada com a GUI local
+        # pelas variaveis do repositorio.
+        if: ${{ always() && steps.desktop.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          DISTRO: ${{ vars.DISTRO || 'ubuntu' }}
+          DESKTOP_ENV: ${{ vars.DESKTOP_ENV || 'xfce' }}
+          DOTFILES_URLS: ${{ vars.DOTFILES_URLS }}
+          INSTRUCAO_IA: ${{ vars.INSTRUCAO_IA }}
+          RENOVAR: ${{ vars.RENOVAR }}
+          RENOVAR_MAX_HORAS: ${{ vars.RENOVAR_MAX_HORAS }}
+          RENOVAR_MAX_HORAS_MES: ${{ vars.RENOVAR_MAX_HORAS_MES }}
+          PUBLIC_REPO: ${{ vars.PUBLIC_REPO }}
+          RENOVAR_TOKEN: ${{ secrets.RENOVAR_TOKEN }}
+        run: bash scripts/gui_sessao.sh
+
+      - name: Restaurar sessao e abrir o TeleDrive
+        # Primeira vez: entre pelo desktop; a sessao e guardada e restaurada nas proximas.
+        if: ${{ vars.TELEDRIVE_AUTO != 'false' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          TG_SESSION: ${{ secrets.TG_SESSION }}
+          TG_CHANNEL_ID: ${{ secrets.TG_CHANNEL_ID }}
+          BACKUP_PASSWORD: ${{ secrets.BACKUP_PASSWORD }}
+          BACKUP_FOLDER: ${{ vars.BACKUP_FOLDER || 'Linux Web PC' }}
+        run: bash scripts/teledrive_abrir.sh
+
+      - name: Abrir aplicativos solicitados com Qwen e Needle
+        timeout-minutes: 15
+        env:
+          NEEDLE_PREVIEW_ONLY: ${{ inputs.needle_preview_only && '1' || '0' }}
+          STARTUP_INSTRUCTION: ${{ inputs.startup_instruction || vars.INSTRUCAO_IA }}
+          STARTUP_SECRETS_JSON: ${{ secrets.STARTUP_SECRETS_JSON }}
+          NEEDLE_TELEMETRY: '0'
+          DO_NOT_TRACK: '1'
+        run: |
+          "$RUNNER_TEMP/backup-venv/bin/python" scripts/hybrid_startup.py --phase after_desktop
+
+      - name: Enviar link do desktop por email
+        # Uma falha no email nao interrompe o desktop nem o backup.
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: python3 scripts/enviar_link.py
+
+      - name: Manter sessao e copiar alteracoes a cada 30 minutos
+        timeout-minutes: 300
+        env:
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          TG_SESSION: ${{ secrets.TG_SESSION }}
+          TG_CHANNEL_ID: ${{ secrets.TG_CHANNEL_ID }}
+          TELEDRIVE_PASSPHRASE: ${{ secrets.TELEDRIVE_PASSPHRASE }}
+          BACKUP_PASSWORD: ${{ secrets.BACKUP_PASSWORD }}
+          BACKUP_FOLDER: ${{ vars.BACKUP_FOLDER || 'Linux Web PC' }}
+          BACKUP_PATHS_JSON: ${{ vars.BACKUP_PATHS_JSON }}
+          # Revezamento: 30 min antes do fim, abre o mesmo workflow no repositorio par.
+          PEER_REPO: ${{ vars.PEER_REPO }}
+          PEER_WORKFLOW: ${{ vars.PEER_WORKFLOW }}
+          PEER_REPO_TOKEN: ${{ secrets.PEER_REPO_TOKEN }}
+          HANDOFF_STARTUP_INSTRUCTION: ${{ inputs.startup_instruction }}
+          NEEDLE_PREVIEW_ONLY: ${{ inputs.needle_preview_only && '1' || '0' }}
+          TELEDRIVE_AUTO: ${{ vars.TELEDRIVE_AUTO }}
+          # Aviso por e-mail se o revezamento falhar.
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: |
+          "$RUNNER_TEMP/backup-venv/bin/python" scripts/session_loop.py
+
+      - name: Executar tarefas de encerramento e descarregar Qwen
+        if: ${{ always() && steps.dependencies.outcome == 'success' }}
+        timeout-minutes: 10
+        env:
+          NEEDLE_PREVIEW_ONLY: ${{ inputs.needle_preview_only && '1' || '0' }}
+          STARTUP_SECRETS_JSON: ${{ secrets.STARTUP_SECRETS_JSON }}
+          NEEDLE_TELEMETRY: '0'
+          DO_NOT_TRACK: '1'
+        run: |
+          "$RUNNER_TEMP/backup-venv/bin/python" scripts/hybrid_startup.py --phase before_backup
+
+      - name: Salvar sessao do TeleDrive
+        if: ${{ always() && steps.dependencies.outcome == 'success' && vars.TELEDRIVE_AUTO != 'false' }}
+        continue-on-error: true
+        timeout-minutes: 10
+        env:
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          TG_SESSION: ${{ secrets.TG_SESSION }}
+          TG_CHANNEL_ID: ${{ secrets.TG_CHANNEL_ID }}
+          BACKUP_PASSWORD: ${{ secrets.BACKUP_PASSWORD }}
+          BACKUP_FOLDER: ${{ vars.BACKUP_FOLDER || 'Linux Web PC' }}
+        run: |
+          "$RUNNER_TEMP/backup-venv/bin/python" scripts/teledrive_sessao.py save --final
+
+      - name: Copiar alteracoes finais para TeleDrive
+        if: ${{ always() && steps.dependencies.outcome == 'success' }}
+        timeout-minutes: 40
+        env:
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          TG_SESSION: ${{ secrets.TG_SESSION }}
+          TG_CHANNEL_ID: ${{ secrets.TG_CHANNEL_ID }}
+          TELEDRIVE_PASSPHRASE: ${{ secrets.TELEDRIVE_PASSPHRASE }}
+          BACKUP_PASSWORD: ${{ secrets.BACKUP_PASSWORD }}
+          BACKUP_FOLDER: ${{ vars.BACKUP_FOLDER || 'Linux Web PC' }}
+          BACKUP_PATHS_JSON: ${{ vars.BACKUP_PATHS_JSON }}
+          # Indice compartilhado entre os dois repositorios do revezamento.
+          PEER_REPO: ${{ vars.PEER_REPO }}
+          PEER_WORKFLOW: ${{ vars.PEER_WORKFLOW }}
+          PEER_REPO_TOKEN: ${{ secrets.PEER_REPO_TOKEN }}
+        run: |
+          "$RUNNER_TEMP/backup-venv/bin/python" scripts/incremental_backup.py
+
+      - name: Renovar sessao automaticamente
+        # Renovacao em um unico repositorio: abre a proxima sessao com as mesmas
+        # instrucoes assim que esta terminar (ver README, "Renovacao automatica").
+        # Ligue com a variavel RENOVAR=true e o Secret RENOVAR_TOKEN.
+        if: ${{ always() && steps.dependencies.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          RENOVAR: ${{ vars.RENOVAR }}
+          RENOVAR_TOKEN: ${{ secrets.RENOVAR_TOKEN }}
+          RENOVAR_WORKFLOW: ${{ vars.RENOVAR_WORKFLOW }}
+          RENOVAR_MAX_HORAS: ${{ vars.RENOVAR_MAX_HORAS }}
+          RENOVAR_MAX_HORAS_MES: ${{ vars.RENOVAR_MAX_HORAS_MES }}
+          PEER_REPO: ${{ vars.PEER_REPO }}
+          HANDOFF_STARTUP_INSTRUCTION: ${{ inputs.startup_instruction || vars.INSTRUCAO_IA }}
+          NEEDLE_PREVIEW_ONLY: ${{ inputs.needle_preview_only && '1' || '0' }}
+          # Aviso por e-mail sobre a renovacao.
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: |
+          "$RUNNER_TEMP/backup-venv/bin/python" scripts/renovar_sessao.py renovar
+
+      - name: Exportar somente ferramentas aprendidas validadas
+        id: export_tools
+        if: ${{ always() }}
+        env:
+          STARTUP_SECRETS_JSON: ${{ secrets.STARTUP_SECRETS_JSON }}
+        run: python3 scripts/sync_learned_tools.py export --directory "$RUNNER_TEMP/learned-export"
+
+      - name: Guardar ferramentas para o job de persistencia
+        if: ${{ always() && steps.export_tools.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: learned-tools-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/learned-export/
+          retention-days: 7
+          if-no-files-found: error
+
+  persist-learned-tools:
+    needs: linux-web-pc
+    if: ${{ always() && needs.linux-web-pc.outputs.tools_ready == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: learned-tools-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/learned-import
+      - name: Publicar ferramentas na branch dedicada
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STARTUP_SECRETS_JSON: ${{ secrets.STARTUP_SECRETS_JSON }}
+        run: python3 scripts/sync_learned_tools.py publish --directory "$RUNNER_TEMP/learned-import"

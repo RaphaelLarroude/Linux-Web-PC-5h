@@ -1,0 +1,49 @@
+name: Vigia da renovacao
+
+# Rede de seguranca da renovacao automatica em um unico repositorio (ver README,
+# "Renovacao automatica em um unico repositorio"). Roda ao fim de cada sessao
+# (workflow_run) e de 6 em 6 horas (schedule): se nao houver nenhuma sessao
+# ativa, abre uma nova e avisa por e-mail. Ligue com a variavel RENOVAR=true.
+# Sem ela o job e ignorado e nao consome minutos.
+on:
+  workflow_run:
+    workflows: ['Linux Web PC']
+    types: [completed]
+  schedule:
+    # Minutos fora de :00/:30, que sao os mais disputados pelo agendador do GitHub.
+    - cron: '13 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: renovar
+  cancel-in-progress: false
+
+jobs:
+  vigiar:
+    if: ${{ vars.RENOVAR == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts
+
+      - name: Reabrir o ciclo se nenhuma sessao estiver ativa
+        env:
+          RENOVAR: ${{ vars.RENOVAR }}
+          RENOVAR_TOKEN: ${{ secrets.RENOVAR_TOKEN }}
+          RENOVAR_WORKFLOW: ${{ vars.RENOVAR_WORKFLOW }}
+          RENOVAR_MAX_HORAS: ${{ vars.RENOVAR_MAX_HORAS }}
+          RENOVAR_MAX_HORAS_MES: ${{ vars.RENOVAR_MAX_HORAS_MES }}
+          PEER_REPO: ${{ vars.PEER_REPO }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: python3 scripts/renovar_sessao.py vigiar
