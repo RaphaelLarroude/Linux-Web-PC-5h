@@ -1,0 +1,8 @@
+{
+  "layout": "original_names",
+  "roots": ["/"],
+  "exclude": ["/proc", "/sys", "/dev", "/run", "/tmp", "/mnt", "/media", "/lost+found", "/swapfile", "/swap.img"],
+  "exclude_home_caches": true,
+  "batch_mebibytes": 128,
+  "batch_files": 2000
+}

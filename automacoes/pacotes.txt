@@ -1,0 +1,5 @@
+# Pacotes disponiveis nos repositorios apt do Ubuntu 24.04.
+# Esta lista so e instalada quando a instrucao seleciona essa rotina.
+git
+curl
+jq

@@ -1,0 +1,3 @@
+# Uma tarefa afirmativa por linha, aplicada antes do backup final.
+# Nao inclua chaves, senhas, sessoes ou outros dados privados.
+# Exemplo: Pare o servico que configurei para fechar o banco de dados.

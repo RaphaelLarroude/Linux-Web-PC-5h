@@ -1,0 +1,8 @@
+# Escreva abaixo o que deve acontecer a cada nova sessao.
+# Uma instrucao por linha. Linhas que comecam com # sao ignoradas.
+# Deixe somente comentarios para desativar as automacoes.
+# Este arquivo pode ser publico: use nomes de Secrets, nunca cole chaves ou senhas.
+# Exemplos (remova o # para ativar):
+# Instale os programas da lista.
+# Prepare minhas pastas de trabalho.
+# Abra os programas da lista.
